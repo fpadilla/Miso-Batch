@@ -1,0 +1,75 @@
+[data]
+# directory where BAM files are
+bam_prefix = input/
+# directory where MISO output is
+miso_prefix = MISO_PREFIX 
+
+bam_files = [
+    "DAR_AD10.bam",
+    "DAR_AD9.bam",
+    "DAR_V23.bam",
+    "DAR_V21.bam"]
+
+miso_files = [
+    "DAR_AD10",
+    "DAR_AD9",
+    "DAR_V23",
+    "DAR_V21"]
+
+sample_labels = [
+    "Apigenin_AD10",
+    "DMSO_AD9",
+    "Apigenin_V23",
+    "DMSO_V21"]
+
+[plotting]
+# Dimensions of figure to be plotted (in inches)
+fig_width = 7
+fig_height = 5
+# Factor to scale down introns and exons by
+intron_scale = 30
+exon_scale = 4
+# Whether to use a log scale or not when plotting
+logged = False
+#logged = True
+font_size = 4
+
+# Max y-axis
+#ymax = 350
+
+# Whether to plot posterior distributions inferred by MISO
+show_posteriors = True
+
+# Whether to show posterior distributions as bar summaries
+bar_posteriors = True
+
+# Whether to plot the number of reads in each junction
+number_junctions = False
+
+resolution = .5
+posterior_bins = 40
+gene_posterior_ratio = 5
+
+# List of colors for read denisites of each sample
+colors = [
+    "#CC0011",
+    "#FF8800",    
+    "#CC0011",
+    "#FF8800"]
+
+# Number of mapped reads in each sample
+# Using the total number of reads mapped and not the total number of hits
+# (Used to normalize the read density for RPKM calculation)
+coverages = [
+    43121969,
+    32512718,
+    29228044,
+    33828822]
+
+# Bar color for Bayes factor distribution
+# plots (--plot-bf-dist)
+# Paint them blue
+bar_color = "b"
+
+# Bayes factors thresholds to use for --plot-bf-dist
+bf_thresholds = [0, 1, 2, 5, 10, 20]

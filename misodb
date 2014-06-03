@@ -1,0 +1,551 @@
+#!/bin/bash
+
+usage()
+{
+cat << EOF
+    This script create, import and index data from miso in tsv format into sqlite database. 
+
+    USAGE:
+
+    Database Creation:
+    $0 create dbfile
+
+    Import:
+    $0 type operation file sample1 sample2 
+        type:       Two posible values: event or isoform
+        operation:  Two posible values: psi or diff
+        file:       file in format tsv
+        sample1:    Name of the first sample
+        sample2:    For type diff is the name of second sample
+
+    Index:
+    $0 index dbFile
+EOF
+}
+
+create()
+{
+    FILE=$1
+    # validation
+    if [[ -z $FILE ]] 
+    then
+         echo "Error: database file is missing  "	
+         usage
+         exit 1
+    fi
+    
+    sqlite3 $FILE <<EOF
+        create table isoform_psi ( 
+            sample text,
+            event_name    text,  
+            miso_posterior_mean     real,
+            ci_low  real,
+            ci_high real,
+            isoforms    text,    
+            assigned_counts integer,
+            chrom   text,
+            strand  text,
+            mRNA_starts integer,
+            mRNA_ends integer
+        );
+
+        create table diff_isoforms ( 
+            sample1 text,
+            sample2 text,    
+            event_name text,
+            diff   real,
+            bayes_factor real,    
+            isoform_id     text,
+            chrom   text,
+            strand  text,
+            mRNA_starts  integer,   
+            mRNA_ends integer
+        );
+
+        create table event_psi ( 
+            sample text,
+            event_name    text,
+            event_type text, 
+            miso_posterior_mean real,
+            ci_low  real,
+            ci_high real,
+            isoforms    text,    
+            assigned_counts integer,
+            chrom   text,
+            strand  text,
+            mRNA_starts integer,
+            mRNA_ends integer
+        );
+
+        create table diff_events ( 
+            sample1 text,
+            sample2 text,    
+            event_name text,
+            event_type text, 
+            diff   real,
+            bayes_factor real,    
+            event_id     text,
+            chrom   text,
+            strand  text,
+            mRNA_starts  integer,   
+            mRNA_ends integer
+        );
+
+        create table event_genes (
+            event_id text,
+            gene_id text,
+            event_type text
+        );
+
+        /* import temp tables */
+
+        create table imp_psi ( 
+            event_name      text,
+            miso_posterior_mean  real,   
+            ci_low  real,
+            ci_high real,
+            isoforms text,
+            assigned_counts integer,
+            chrom   text,
+            strand  text,
+            mRNA_starts  integer,   
+            mRNA_ends integer
+        );
+
+        create table imp_diff ( 
+            event_name    text,  
+            sample1_posterior_mean real,  
+            sample1_ci_low   real,
+            sample1_ci_high  real,
+            sample2_posterior_mean   real,
+            sample2_ci_low   real,
+            sample2_ci_high   real,
+            diff    text,
+            bayes_factor real,   
+            isoforms        text,
+            chrom   text,
+            strand  text,
+            mRNA_starts  integer,   
+            mRNA_ends integer
+        );
+
+EOF
+
+# load event to gene table
+for TEXT_FILE in hg19_alt_events/*_to_ensGene.txt
+do
+    TYPE=`basename $TEXT_FILE .hg19.gff3_to_ensGene.txt`
+    TYPE=${TYPE,,}
+    ./gene3eventConverter $TYPE $TEXT_FILE > /tmp/gene2event.tsv
+    sqlite3 $FILE <<EOF
+.mode tabs 
+.import /tmp/gene2event.tsv event_genes
+EOF
+done
+rm /tmp/gene2event.tsv
+
+# load event length and exon counts
+for TEXT_FILE in hg19_alt_events/*_isoforms_length.txt
+do
+    TYPE=`basename $TEXT_FILE .hg19.gff3_to_ensGene.txt`
+    TYPE=${TYPE,,}
+    sqlite3 $FILE <<EOF
+.separator " "
+create table if not exists imp_event(event_id text, length integer, exons integer);
+.import $TEXT_FILE imp_event
+EOF
+done
+
+    sqlite3 $FILE <<EOF
+create table event as select distinct * from imp_event;
+drop table imp_event;
+
+.mode tabs
+create table gene_names(gene_id text, name text);
+.import ID_Name_GRCh37.65_genes.txt gene_names
+
+.mode tabs
+create table candidate_genes(name text,gene_id text);
+.import Dani_target_genes.txt candidate_genes
+EOF
+
+}
+
+index(){
+
+    FILE=$1
+    # validation
+    if [[ -z $FILE ]] 
+    then
+         echo "Error: database file is missing  "	
+         usage
+         exit 1
+    fi
+    sqlite3 $FILE <<EOF
+
+    -- INDEXES 
+    -- =======
+
+    create index diff_events_samples on diff_events ( sample1, sample2 );
+    create index diff_events_diff on diff_events ( diff);
+
+    create index diff_events_bayes_factor on diff_events ( bayes_factor);
+    create index diff_events_event on diff_events ( event_name);
+    create index diff_events_type on diff_events ( event_type);
+
+    create index diff_isoforms_samples on diff_isoforms ( sample1, sample2 );
+    create index diff_isoforms_diff on diff_isoforms ( diff);
+    create index diff_isoforms_bayes_factor on diff_isoforms ( bayes_factor);
+    create index diff_isoforms_event on diff_isoforms ( event_name);
+
+    create index isoform_psi_sample on isoform_psi (sample);
+    create index isoform_psi_isoforms on isoform_psi (isoforms);
+
+    create index event_psi_sample on event_psi (sample);
+    create index event_psi_isoforms on event_psi (isoforms);
+    create index event_psi_type on diff_events ( event_type);
+
+    create index event_genes_gene on event_genes(gene_id);
+    create index event_genes_event on event_genes(event_id);    
+    
+    -- ISOFORM TABLES
+    -- ==============
+
+
+    drop table diff_events_2cmp ;
+    create table diff_events_2cmp as 
+     select e.event_type event_type, e.event_name event_name, e.event_id event_id,
+        sample1, s1.ci_low ci_low1, s1.ci_high ci_high1, s1.miso_posterior_mean ci_mean1, s1.assigned_counts counts1,
+        sample2, s2.ci_low ci_low2, s2.ci_high ci_high2, s2.miso_posterior_mean ci_mean2, s2.assigned_counts counts2,
+        diff, bayes_factor, min_bayes_factor
+     from diff_events e 
+     join event_psi s1 on (e.sample1=s1.sample and e.event_name=s1.event_name and e.event_id=s1.isoforms)
+     join event_psi s2 on (e.sample2=s2.sample and e.event_name=s2.event_name and e.event_id=s2.isoforms)
+     join ( select t.event_type event_type, t.event_name event_name, min(bayes_factor) min_bayes_factor
+                    from diff_events t 
+                     where t.bayes_factor >= 20
+                     group by 1,2 having count(*)>=4
+        ) as j on (j.event_type=e.event_type and j.event_name=e.event_name)
+    order by event_type,event_name,sample1,sample2,event_id ;    
+
+    drop table diff_isoform_2cmp;
+    create table diff_isoform_2cmp as 
+     select e.event_name gene_id, e.isoform_id isoform_id,
+        sample1, s1.ci_low ci_low1, s1.ci_high ci_high1, s1.miso_posterior_mean ci_mean1, s1.assigned_counts counts1,
+        sample2, s2.ci_low ci_low2, s2.ci_high ci_high2, s2.miso_posterior_mean ci_mean2, s2.assigned_counts counts2,
+        diff, bayes_factor
+     from diff_isoforms e 
+     join isoform_psi s1 on (e.sample1=s1.sample and e.event_name=s1.event_name and e.isoform_id=s1.isoforms)
+     join isoform_psi s2 on (e.sample2=s2.sample and e.event_name=s2.event_name and e.isoform_id=s2.isoforms)
+     join ( select t.event_name event_name, count(*)
+                    from diff_isoforms t 
+                      where t.bayes_factor >= 20
+                     group by 1 having count(*)>=4
+        ) as j on (j.event_name=e.event_name)
+    order by e.event_name,sample1,sample2,e.isoform_id;
+
+    drop table diff_isoform_report;
+    create table diff_isoform_report as 
+     select e.*, group_concat(n.name,',') genes
+     from diff_isoform_2cmp e
+     join gene_names n on(n.gene_id=e.gene_id)
+     group by gene_id,isoform_id,sample1,sample2
+     order by gene_id,isoform_id,sample1,sample2;    
+
+    -- DIFF EVENT TABLES
+    -- ===========
+    
+    drop table diff_event_report;
+    create table diff_event_report as 
+     select e.*, group_concat(n.name,',') genes
+     from diff_events_2cmp e
+     join event_genes g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     join gene_names n on(n.gene_id=g.gene_id)
+     group by e.event_type,e.event_name,event_id,sample1,sample2
+     order by event_type,event_name,sample1,sample2,event_id;
+
+    drop view diff_event_resume;
+    create view diff_event_resume as 
+     select sample1||'-'||sample2 comparation, e.event_type, 
+        case 
+            when bayes_factor <=5 then '<=5'
+            when bayes_factor>5 and bayes_factor<=10 then  '5-10'
+            when bayes_factor>10 and bayes_factor<=20 then  '10-20'
+            when bayes_factor>20 then  '>20'
+        end as bayes_factor, event_name, gene_id
+     from diff_event_report e
+     join ( select gene_id, event_id, event_type 
+            from event_genes group by event_type, event_id 
+           ) g on (e.event_name=g.event_id and e.event_type=g.event_type) ;
+           
+
+    -- EVENT TABLES
+    -- ============
+
+    -- event genes and event and counts by event type and/or sample
+    drop view event_stats;
+    create view event_stats as 
+     select sample, e.event_type event_type,
+        count(distinct event_name) event_count, 
+        count(distinct gene_id) gene_count
+     from event_psi e
+     join ( select gene_id, event_id, event_type 
+            from event_genes group by event_type, event_id 
+           ) g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     group by 1,2
+       UNION
+     select sample, 'Sample Count',
+        count(distinct e.event_type||e.event_name) event_count, 
+        count(distinct gene_id) gene_count
+     from event_psi e
+     join ( select gene_id, event_id, event_type 
+            from event_genes group by event_type, event_id 
+           ) g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     group by 1 ;
+
+    -- EVENT REPORTS
+    -- =============
+    
+    -- commands starting with dot(.) doesn't allow spaces or tab charcater at line begining
+
+.mode csv
+.output reports/sample_event_counts.csv
+    select * from event_stats;
+
+    -- counts of genes and event types common in the two samples
+.output reports/common_event_counts.csv
+    select e.event_type, count(distinct event_name), count(distinct gene_id) 
+    from  (select distinct event_type, event_name
+        from event_psi
+        group by event_type,event_name
+        having count(distinct sample) >=4 ) e
+     join ( select gene_id, event_id, event_type 
+            from event_genes group by event_type, event_id 
+           ) g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     group by e.event_type;
+
+    -- event type counts of whole genome
+.output reports/genome_event_counts.csv
+    select event_type, count(distinct event_name) 
+    from event_genes 
+    group by event_type;
+
+    -- differencial event data 
+.mode csv
+.output diff_event_stats.csv
+     select * from diff_event_stats;
+.output stdout
+         
+.mode csv
+.output diff_event_report.csv
+     select * from diff_event_report;
+     --where bayes_factor>5 ;
+.output stdout
+
+-- differencial events filtered by candidate genes
+.mode csv
+.output diff_event_candidate_genes_report.csv
+     select e.*, group_concat(n.name,',') genes
+     from diff_events_2cmp e
+     join event_genes g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     join gene_names n on(n.gene_id=g.gene_id)
+     join candidate_genes c on(c.gene_id=g.gene_id)
+     where bayes_factor>5
+     group by e.event_type,e.event_name,event_id,sample1,sample2
+     order by event_type,event_name,sample1,sample2,event_id;
+.output stdout
+
+    -- ISOFORM REPORTS
+    -- ===============
+    
+drop table cuff_miso_isoforms;
+create table cuff_miso_isoforms (chr text, start integer, end integer, cuff_ids text, 
+    gene_id text, transcript_id text);
+.mode csv
+.import Cuff_DRM_AD_V_Intersection_MISO_MK_AD_V.csv cuff_miso_isoforms
+
+drop table diff_event_report_iso_cuff;
+create table diff_event_report_iso_cuff as 
+     select e.*, group_concat(n.name,',') genes, group_concat(n.gene_id,','), cuff_ids
+     from diff_events_2cmp e
+     join event_genes g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     join gene_names n on(n.gene_id=g.gene_id)
+     join cuff_miso_isoforms ci on (ci.gene_id=n.gene_id)
+     group by e.event_type,e.event_name,event_id,sample1,sample2
+     order by event_type,event_name,sample1,sample2,event_id;
+
+.mode csv
+.output diff_event_report_iso_cuff.csv
+     select * from diff_event_report_iso_cuff; 
+.output stdout
+
+.mode csv
+.output diff_event_report_iso_cuff_plots.csv
+     select distinct event_type, event_name from diff_event_report_iso_cuff; 
+.output stdout
+
+drop table cuffdiff_annotated;
+create table cuffdiff_annotated ( chr text, start integer, end integer, cuff_id text, cluster_id text, 
+gene_id text, transcript_id, knownCanonical_transcript text, protein text, kgXref_kg_id text,
+kgXref_mRNA text, kgXref_sp_id text, kgXref_spDisplay_id text, kgXref_geneSymbol text, kgXref_refseq text, 
+kgXref_protAcc text, kgXref_description text, gXref_rfamAcc text, kgXref_tRnaName text);
+.import cuff_commons.txt cuffdiff_annotated
+
+.mode csv
+.output diff_event_cuff_report.csv
+select e.*, group_concat(n.name,',') genes, group_concat(n.gene_id,','), cuff_id
+     from diff_events_2cmp e
+     join event_genes g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     join gene_names n on(n.gene_id=g.gene_id)
+     join cuffdiff_annotated ci on (ci.gene_id=n.gene_id)
+     group by e.event_type,e.event_name,event_id,sample1,sample2
+     order by event_type,event_name,sample1,sample2,event_id;
+.output stdout
+
+.mode tabs
+.output diff_event_misoIso_report.tsv
+select e.*, group_concat(distinct n.name) genes, group_concat(distinct n.gene_id),  group_concat(distinct isoform_id) isoform_ids
+     from diff_events_2cmp e
+     join event_genes g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     join gene_names n on(n.gene_id=g.gene_id)
+     join (select distinct gene_id, isoform_id from diff_isoform_2cmp where bayes_factor>=20) ci on (ci.gene_id=n.gene_id)
+     group by e.event_type,e.event_name,event_id,sample1,sample2
+     order by event_type,event_name,sample1,sample2,event_id, n.gene_id;
+.output stdout
+
+
+create table transcripts(gene_id text, transcript_id);
+.import Transcript_Gene_Confidence_list.txt transcripts
+
+.mode tabs
+.output diff_event_misoTranscripts_report.tsv
+select e.*, group_concat(distinct n.name) genes, group_concat(distinct n.gene_id),  
+        group_concat(distinct transcript_id) transcript_ids
+     from diff_events_2cmp e
+     join event_genes g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     join gene_names n on(n.gene_id=g.gene_id)
+     join (select distinct gene_id, transcript_id from transcripts) ci on (ci.gene_id=n.gene_id)
+     group by e.event_type,e.event_name,event_id,sample1,sample2
+     order by event_type,event_name,sample1,sample2,event_id, n.gene_id;
+.output stdout
+
+
+select e.*, group_concat(distinct n.name) genes, group_concat(distinct n.gene_id)
+     from diff_events_2cmp e
+     join event_genes g on (e.event_name=g.event_id and e.event_type=g.event_type)
+     join gene_names n on(n.gene_id=g.gene_id)
+     where n.gene_id='ENSG00000164128'
+     group by e.event_type,e.event_name,event_id,sample1,sample2
+     order by event_type,event_name,sample1,sample2,event_id, n.gene_id;
+
+EOF
+  
+}
+
+
+import()
+{
+    echo    "$0 $1 $2 $3 $4 $5" # debug
+    # Argument processing
+    DBFILE="$1"
+    TYPE="$2"
+    OPERATION="$3"
+    FILE="$4"
+    SAMPLE="$5"
+    SAMPLE2="$6"
+
+    if [[ -z $DBFILE ]] 
+    then
+        echo "Error: database file is missing  "
+        usage
+        exit 1
+    fi
+    
+    # validation
+    if [[ -z $TYPE ]] 
+    then
+         echo "Error: Type is missing  "	
+         usage
+         exit 1
+    fi
+
+    case $TYPE in
+        a3ss|a5ss|afe|ale|mxe|ri|se|tutr)     TABLE="event" 
+                                              TYPE="'$TYPE',"
+                                              ;;
+        *)                                    TABLE="isoform" 
+                                              TYPE="";;
+    esac
+
+    # validation
+    if [[ -z $FILE ]] 
+    then
+         echo "Error: $FILE missing file "	
+         usage
+         exit 1
+    fi
+
+    # validation
+    if [[ -z $SAMPLE ]] 
+    then
+         echo "Error: missing sample name "	
+         usage
+         exit 1
+    fi
+
+    # validation
+    if [[ $OPERATION == "diff" && -z $SAMPLE2 ]] 
+    then
+         echo "Error: missing second sample name "	
+         usage
+         exit 1
+    fi
+
+    case $OPERATION in
+        diff)   TABLE=diff_${TABLE}s 
+                echo ".mode tabs
+                    delete from imp_diff; 
+.import $FILE imp_diff 
+                    insert into $TABLE select '$SAMPLE', '$SAMPLE2', event_name, $TYPE diff, bayes_factor, 
+                    isoforms, chrom, strand,  mRNA_starts, mRNA_ends from imp_diff; " > import.sql
+                sqlite3 $DBFILE < import.sql
+                #rm import.sql
+                ;;
+        psi)    TABLE=${TABLE}_psi
+                echo ".mode tabs  
+                    delete from imp_psi; 
+.import $FILE imp_psi 
+                    insert into $TABLE select '$SAMPLE', event_name, $TYPE miso_posterior_mean, ci_low, 
+                    ci_high, isoforms, assigned_counts, chrom, strand, mRNA_starts, mRNA_ends 
+                    from imp_psi; " > import.sql
+                sqlite3 $DBFILE < import.sql
+                #rm import.sql
+                ;;
+        *)      echo "Error: invalid operation $OPERATION"; 
+                usage; 
+                exit 0 
+                ;;
+    esac
+}
+
+
+# main 
+
+op=$1
+#shift
+
+case $op in
+    create)     shift
+                create $@
+                ;;
+    import)     shift
+                import $@
+                ;;
+    index)      shift;
+                index $@
+                ;;
+    *)          usage
+                ;;
+esac
+
+
